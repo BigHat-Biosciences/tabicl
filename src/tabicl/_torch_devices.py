@@ -75,17 +75,21 @@ def external_backend_is_available(device_type: str) -> bool:
     if module_name is None:
         return False
 
-    # Cheap, side-effect-free installed check before paying for the import.
-    try:
-        if importlib.util.find_spec(module_name) is None:
+    module = sys.modules.get(module_name)
+    if module is None:
+        # Cheap, side-effect-free installed check before paying for the import.
+        # Only consulted when the module is not already imported: find_spec raises
+        # for an entry in sys.modules that carries no __spec__.
+        try:
+            if importlib.util.find_spec(module_name) is None:
+                return False
+        except (ImportError, ValueError):
             return False
-    except (ImportError, ValueError):
-        return False
 
-    try:
-        module = importlib.import_module(module_name)
-    except Exception:
-        return False
+        try:
+            module = importlib.import_module(module_name)
+        except Exception:
+            return False
 
     device_count = getattr(module, "device_count", None)
     if callable(device_count):
