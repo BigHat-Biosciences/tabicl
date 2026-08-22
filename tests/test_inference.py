@@ -291,3 +291,82 @@ def test_mps_memory_estimate_uses_recommended_minus_current(monkeypatch):
     monkeypatch.setattr(mgr, "_get_device_backend_api", lambda: fake_api)
     available_mib = mgr.get_available_gpu_memory()
     assert available_mib == pytest.approx(6 * 1024.0)
+
+
+class _FakeBackendNoMemoryApis:
+    """Accelerator backend exposing neither ``mem_get_info`` nor the MPS pair."""
+
+    @staticmethod
+    def is_available():
+        return True
+
+
+class _FakeBackendMemGetInfo(_FakeBackendNoMemoryApis):
+    """Backend exposing ``mem_get_info`` (CUDA/XPU convention)."""
+
+    @staticmethod
+    def mem_get_info(device=None):
+        return (512 * 1024 * 1024, 1024 * 1024 * 1024)
+
+
+class _FakeBackendMpsStyle(_FakeBackendNoMemoryApis):
+    """Backend exposing the MPS ``recommended``/``current`` pair."""
+
+    @staticmethod
+    def recommended_max_memory():
+        return 1024 * 1024 * 1024
+
+    @staticmethod
+    def current_allocated_memory():
+        return 512 * 1024 * 1024
+
+
+def _manager_on_fake_accelerator(backend, monkeypatch):
+    """An InferenceManager pinned to a non-CPU device with a stubbed backend."""
+    mgr = InferenceManager(enc_name="tf_col", out_dim=4)
+    mgr.configure(device="cpu", use_amp=False, use_fa3=False, use_async=False)
+    # Pretend to be an accelerator so the CPU short-circuit does not apply.
+    monkeypatch.setattr(mgr, "exe_device", torch.device("xla"), raising=False)
+    monkeypatch.setattr(mgr, "_get_device_backend_api", lambda: backend)
+    return mgr
+
+
+def test_supports_auto_batching_false_on_cpu():
+    """CPU has no accelerator memory APIs by definition."""
+    mgr = InferenceManager(enc_name="tf_col", out_dim=4)
+    mgr.configure(device="cpu", use_amp=False, use_fa3=False, use_async=False)
+    assert mgr.supports_auto_batching() is False
+
+
+def test_supports_auto_batching_false_without_memory_apis(monkeypatch):
+    """A backend with no free-memory query must not attempt safe batch sizing.
+
+    ``get_available_gpu_memory`` returns 0.0 for such backends, and 0.0 means
+    "unknown" rather than "nothing free". Sizing batches against it would select
+    the minimum batch size and then conclude that outputs must be offloaded.
+    This is the situation for ``torch_xla`` on TPU and AWS Neuron.
+    """
+    mgr = _manager_on_fake_accelerator(_FakeBackendNoMemoryApis, monkeypatch)
+    assert mgr.supports_auto_batching() is False
+    assert mgr.get_available_gpu_memory() == 0.0
+
+
+def test_supports_auto_batching_false_when_backend_api_missing(monkeypatch):
+    """An unreachable backend module must not enable auto-batching."""
+    mgr = InferenceManager(enc_name="tf_col", out_dim=4)
+    mgr.configure(device="cpu", use_amp=False, use_fa3=False, use_async=False)
+    monkeypatch.setattr(mgr, "exe_device", torch.device("xla"), raising=False)
+    monkeypatch.setattr(mgr, "_get_device_backend_api", lambda: None)
+    assert mgr.supports_auto_batching() is False
+
+
+def test_supports_auto_batching_true_with_mem_get_info(monkeypatch):
+    """CUDA/XPU-style backends keep auto-batching."""
+    mgr = _manager_on_fake_accelerator(_FakeBackendMemGetInfo, monkeypatch)
+    assert mgr.supports_auto_batching() is True
+
+
+def test_supports_auto_batching_true_with_mps_style_memory_apis(monkeypatch):
+    """MPS-style backends keep auto-batching via recommended-minus-current."""
+    mgr = _manager_on_fake_accelerator(_FakeBackendMpsStyle, monkeypatch)
+    assert mgr.supports_auto_batching() is True

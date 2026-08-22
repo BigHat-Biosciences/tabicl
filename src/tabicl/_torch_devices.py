@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import functools
+import importlib
+import importlib.util
 import subprocess
 import sys
 import warnings
@@ -11,7 +13,17 @@ from typing import Optional, Union
 import torch
 
 # Preference order when ``device=None``: CUDA → XPU → MPS → CPU.
+#
+# ``xla`` is deliberately absent. Probing it requires importing ``torch_xla``,
+# which initializes the PJRT runtime as a side effect, so it must not happen
+# during default device resolution on hosts that merely have the package
+# installed. Pass ``device="xla"`` explicitly to select it.
 DEFAULT_DEVICE_PREFERENCE = ("cuda", "xpu", "mps", "cpu")
+
+# Backends that do NOT follow the ``torch.<device_type>`` convention, mapped to
+# their top-level module. ``torch_xla`` (TPU, AWS Neuron/Inferentia) ships as its
+# own distribution rather than as an attribute of ``torch``.
+EXTERNAL_BACKEND_MODULES = {"xla": "torch_xla"}
 
 # Virtualized Apple Silicon can silently corrupt MPS ``F.linear`` on 3D inputs.
 MPS_NUMERICS_ISSUE_URL = "https://github.com/pytorch/pytorch/issues/192934"
@@ -47,16 +59,62 @@ def mps_possibly_faulty() -> bool:
     return "Virtual" in brand or model.startswith("VirtualMac")
 
 
+@functools.lru_cache(maxsize=None)
+def external_backend_is_available(device_type: str) -> bool:
+    """Return availability for a backend not exposed as ``torch.<device_type>``.
+
+    ``torch_xla`` is a separate top-level distribution, so the ``torch.<backend>``
+    convention cannot reach it. Importing it initializes the PJRT runtime, so this
+    is only ever reached for a device type explicitly asked about — ``xla`` is
+    absent from :data:`DEFAULT_DEVICE_PREFERENCE` precisely so that default device
+    resolution never triggers that import.
+
+    Cached because the import and the device count are both comparatively costly.
+    """
+    module_name = EXTERNAL_BACKEND_MODULES.get(device_type)
+    if module_name is None:
+        return False
+
+    # Cheap, side-effect-free installed check before paying for the import.
+    try:
+        if importlib.util.find_spec(module_name) is None:
+            return False
+    except (ImportError, ValueError):
+        return False
+
+    try:
+        module = importlib.import_module(module_name)
+    except Exception:
+        return False
+
+    device_count = getattr(module, "device_count", None)
+    if callable(device_count):
+        try:
+            return device_count() > 0
+        except Exception:
+            return False
+
+    # Importable but without a device-count API: treat the import as sufficient
+    # rather than claiming unavailable, since torch_xla raises on import when no
+    # runtime can be initialized.
+    return True
+
+
 def backend_is_available(device_type: str) -> bool:
     """Return whether ``torch.<device_type>`` reports itself available.
 
     Uses the usual backend convention where accelerators expose
-    ``torch.<backend>.is_available()``. CPU is always available.
+    ``torch.<backend>.is_available()``. CPU is always available. Backends that do
+    not follow that convention (see :data:`EXTERNAL_BACKEND_MODULES`) are resolved
+    through their own module instead.
     """
     if device_type == "cpu":
         return True
 
     backend_api = getattr(torch, device_type, None)
+    if backend_api is None:
+        return external_backend_is_available(device_type)
+
     is_available = getattr(backend_api, "is_available", None)
     if not callable(is_available):
         return False

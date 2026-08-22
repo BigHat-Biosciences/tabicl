@@ -868,6 +868,35 @@ class InferenceManager:
         """Return whether the tensor is already on the configured execution device."""
         return isinstance(tensor, torch.Tensor) and devices_match(tensor.device, self.exe_device)
 
+    def supports_auto_batching(self) -> bool:
+        """Return whether this backend exposes the memory APIs auto-batching needs.
+
+        Safe batch sizing requires a real free-memory reading. When none is
+        available :meth:`get_available_gpu_memory` returns ``0.0``, which means
+        "unknown", not "nothing free" — sizing batches against it would pick the
+        minimum batch size and then conclude that outputs must be offloaded.
+
+        CPU is excluded because it has no accelerator memory APIs by definition.
+        Accelerators are included only when they expose either ``mem_get_info``
+        (CUDA, XPU) or the ``recommended_max_memory``/``current_allocated_memory``
+        pair (MPS). Backends that expose neither — including those whose module is
+        not reachable as ``torch.<device_type>``, such as ``torch_xla`` — fall back
+        to non-batched execution.
+        """
+        if self.exe_device.type == "cpu":
+            return False
+
+        backend_api = self._get_device_backend_api()
+        if backend_api is None:
+            return False
+
+        if callable(getattr(backend_api, "mem_get_info", None)):
+            return True
+
+        return callable(getattr(backend_api, "recommended_max_memory", None)) and callable(
+            getattr(backend_api, "current_allocated_memory", None)
+        )
+
     def get_available_gpu_memory(self) -> float:
         """Get available GPU memory in MB.
 
@@ -1268,9 +1297,11 @@ class InferenceManager:
         if not auto_batch:
             return self._run_forward(forward_fn, self._prepare_inputs(inputs))
 
-        # CPU: no accelerator memory APIs for safe batch sizing; still route
+        # Backends without memory-introspection APIs cannot support safe batch
+        # sizing: CPU has none by definition, and some accelerators (e.g. torch_xla
+        # on TPU or AWS Neuron) expose no free-memory query either. Still route
         # through _run_forward so AMP/no_grad wrapping stays consistent.
-        if self.exe_device.type == "cpu":
+        if not self.supports_auto_batching():
             return self._run_forward(forward_fn, self._prepare_inputs(inputs))
 
         # Extract shape/dtype info
