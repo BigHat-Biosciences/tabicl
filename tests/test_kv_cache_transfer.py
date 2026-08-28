@@ -15,8 +15,7 @@ def test_cache_transfer_chunks_tensors_larger_than_fixed_budget():
         train_shape=(3, 11, 5),
     )
 
-    # One index along the widest dimension is 3 * 5 * 4 = 60 bytes, so
-    # a 121-byte budget deterministically produces chunks of width two.
+    # 165 float32 values at 121 bytes per transfer produce six chunks.
     with patch("tabicl._model.kv_cache.torch.cat", wraps=torch.cat) as cat:
         moved = cache.to("cpu", max_chunk_bytes=121)
 
@@ -24,6 +23,17 @@ def test_cache_transfer_chunks_tensors_larger_than_fixed_budget():
     torch.testing.assert_close(moved.col_cache.kv[0].key, key)
     torch.testing.assert_close(moved.col_cache.kv[0].value, value)
     torch.testing.assert_close(moved.row_repr, key)
+
+
+def test_chunked_transfer_preserves_non_contiguous_logical_order():
+    tensor = torch.arange(5 * 7, dtype=torch.float32).reshape(5, 7).T
+    assert not tensor.is_contiguous()
+    cache = KVCacheEntry(key=tensor, value=tensor + 100)
+
+    moved = cache.to("cpu", max_chunk_bytes=5 * tensor.element_size())
+
+    torch.testing.assert_close(moved.key, tensor)
+    torch.testing.assert_close(moved.value, tensor + 100)
 
 
 def test_cache_transfer_skips_chunking_when_tensor_fits_budget():

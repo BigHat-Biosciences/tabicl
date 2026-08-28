@@ -36,21 +36,21 @@ def _move_tensor_in_chunks(
     if not max_chunk_bytes or target_bytes <= max_chunk_bytes or tensor.ndim == 0:
         return tensor.to(device=device, dtype=dtype)
 
-    split_dim = max(range(tensor.ndim), key=lambda dim: tensor.shape[dim])
-    split_size = tensor.shape[split_dim]
-    bytes_per_index = max(1, target_bytes // split_size)
-    chunk_size = max(1, max_chunk_bytes // bytes_per_index)
-    if chunk_size >= split_size:
-        return tensor.to(device=device, dtype=dtype)
-
+    # Flatten before transfer. Neuron otherwise lowers a high-rank cache slice
+    # through a device transpose kernel; that graph can compile successfully and
+    # then fail during D2H materialization. A rank-1 transfer has no layout
+    # permutation, and reshape on the destination restores logical tensor order.
+    source_shape = tensor.shape
+    flat = tensor.reshape(-1)
+    chunk_elements = max(1, max_chunk_bytes // target_element_size)
     chunks = [
-        tensor.narrow(split_dim, start, min(chunk_size, split_size - start)).to(
+        flat.narrow(0, start, min(chunk_elements, flat.numel() - start)).to(
             device=device,
             dtype=dtype,
         )
-        for start in range(0, split_size, chunk_size)
+        for start in range(0, flat.numel(), chunk_elements)
     ]
-    return torch.cat(chunks, dim=split_dim)
+    return torch.cat(chunks).reshape(source_shape)
 
 
 @dataclass
