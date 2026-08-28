@@ -23,6 +23,9 @@ class MgrConfig:
     - ``min_batch_size``: Minimum batch size to try before raising an error.
     - ``safety_factor``: Factor to multiply estimated batch size by for conservative
       memory usage.
+    - ``fixed_memory_budget_mb``: Optional deterministic accelerator-memory budget
+      for backends without a free-memory API. When set, it takes precedence over
+      live memory introspection and keeps batching shapes stable across runs.
 
     **Offloading:**
 
@@ -72,6 +75,7 @@ class MgrConfig:
         # Batching
         "min_batch_size",
         "safety_factor",
+        "fixed_memory_budget_mb",
         # Offloading
         "offload",
         "auto_offload_threshold",
@@ -110,6 +114,11 @@ class MgrConfig:
             "expected_type": float,
             "validator": lambda x: 0.0 <= x <= 1.0,
             "error_msg": "safety_factor must be a float between 0 and 1",
+        },
+        "fixed_memory_budget_mb": {
+            "expected_type": (type(None), int, float),
+            "validator": lambda x: x is None or x > 0,
+            "error_msg": "fixed_memory_budget_mb must be a positive number or None",
         },
         # Offloading
         "offload": {
@@ -262,6 +271,7 @@ class InferenceConfig:
                 # Batching
                 min_batch_size=1,
                 safety_factor=0.8,
+                fixed_memory_budget_mb=None,
                 # Offloading
                 offload="auto",
                 auto_offload_threshold=0.5,
@@ -295,6 +305,7 @@ class InferenceConfig:
                 # Batching
                 min_batch_size=1,
                 safety_factor=0.8,
+                fixed_memory_budget_mb=None,
                 # Offloading
                 offload=False,
                 auto_offload_threshold=0.5,
@@ -328,6 +339,7 @@ class InferenceConfig:
                 # Batching
                 min_batch_size=1,
                 safety_factor=0.8,
+                fixed_memory_budget_mb=None,
                 # Offloading
                 offload=False,
                 auto_offload_threshold=0.5,

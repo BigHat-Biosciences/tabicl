@@ -656,6 +656,7 @@ class InferenceManager:
         self,
         min_batch_size: int = 1,
         safety_factor: float = 0.8,
+        fixed_memory_budget_mb: Optional[float] = None,
         offload: Union[bool, Literal["auto", "gpu", "cpu", "disk"], OffloadMode] = "auto",
         auto_offload_threshold: float = 0.5,
         device: Optional[Union[str, torch.device]] = None,
@@ -688,6 +689,13 @@ class InferenceManager:
         safety_factor : float, default=0.8
             Factor (0-1) to multiply estimated batch size by for conservative memory
             usage. Lower values are safer but may result in more batches.
+
+        fixed_memory_budget_mb : float or None, default=None
+            Deterministic accelerator-memory budget used for batch sizing when
+            the backend cannot report free memory. This preserves tiling on
+            static-graph backends such as XLA/Neuron and keeps batch shapes
+            stable across runs. When set, it takes precedence over live memory
+            introspection.
 
         offload : Union[bool, str, OffloadMode], default="auto"
             Where to store output tensors during inference:
@@ -771,6 +779,11 @@ class InferenceManager:
         """
         self.min_batch_size = int(min_batch_size)
         self.safety_factor = float(safety_factor)
+        if fixed_memory_budget_mb is not None and fixed_memory_budget_mb <= 0:
+            raise ValueError("fixed_memory_budget_mb must be positive or None")
+        self.fixed_memory_budget_mb = (
+            None if fixed_memory_budget_mb is None else float(fixed_memory_budget_mb)
+        )
         self.auto_offload_threshold = float(auto_offload_threshold)
         self.use_amp = bool(use_amp)
         self.use_fa3 = bool(use_fa3)
@@ -886,6 +899,9 @@ class InferenceManager:
         if self.exe_device.type == "cpu":
             return False
 
+        if self.fixed_memory_budget_mb is not None:
+            return True
+
         backend_api = self._get_device_backend_api()
         if backend_api is None:
             return False
@@ -914,6 +930,9 @@ class InferenceManager:
             Available GPU memory in megabytes, or 0.0 if the selected backend
             does not expose memory information.
         """
+        if self.fixed_memory_budget_mb is not None:
+            return self.fixed_memory_budget_mb
+
         backend_api = self._get_device_backend_api()
         if backend_api is None:
             return 0.0
@@ -1070,6 +1089,11 @@ class InferenceManager:
             requested = self.offload_mode
 
             if requested == OffloadMode.GPU:
+                if self.fixed_memory_budget_mb is not None:
+                    return OffloadMode.GPU, OffloadReason(
+                        "user_gpu_fixed_batch_budget",
+                        "gpu requested; fixed budget controls batch tiling, not total device capacity",
+                    )
                 if gpu_fits:
                     return OffloadMode.GPU, OffloadReason(
                         "user_gpu_fits", f"{output_mb:.0f}MB <= {gpu_free_mb:.0f}MB gpu free"

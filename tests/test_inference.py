@@ -16,7 +16,7 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 
-from tabicl._model.inference import AsyncCopyManager, InferenceManager, devices_match
+from tabicl._model.inference import AsyncCopyManager, InferenceManager, OffloadMode, devices_match
 
 
 @pytest.mark.parametrize(
@@ -349,6 +349,43 @@ def test_supports_auto_batching_false_without_memory_apis(monkeypatch):
     mgr = _manager_on_fake_accelerator(_FakeBackendNoMemoryApis, monkeypatch)
     assert mgr.supports_auto_batching() is False
     assert mgr.get_available_gpu_memory() == 0.0
+
+
+def test_fixed_memory_budget_enables_deterministic_batching_without_memory_apis(monkeypatch):
+    """A fixed budget restores tiling without requiring a backend memory API."""
+    mgr = _manager_on_fake_accelerator(_FakeBackendNoMemoryApis, monkeypatch)
+    mgr.fixed_memory_budget_mb = 256.0
+    assert mgr.supports_auto_batching() is True
+    assert mgr.get_available_gpu_memory() == 256.0
+    assert mgr.estimate_safe_batch_size(seq_len=80, in_dim=1) == (256.0, 115)
+
+
+def test_fixed_memory_budget_takes_precedence_over_live_memory_api(monkeypatch):
+    mgr = _manager_on_fake_accelerator(_FakeBackendMemGetInfo, monkeypatch)
+    mgr.fixed_memory_budget_mb = 192.0
+    assert mgr.get_available_gpu_memory() == 192.0
+
+
+def test_fixed_batch_budget_does_not_cap_explicit_gpu_output(monkeypatch):
+    """The tiling budget is not the accelerator's total HBM capacity."""
+    mgr = _manager_on_fake_accelerator(_FakeBackendNoMemoryApis, monkeypatch)
+    mgr.fixed_memory_budget_mb = 256.0
+    mgr.offload_mode = OffloadMode.GPU
+    mode, reason = mgr._resolve_offload_mode(
+        output_mb=513.0,
+        gpu_free_mb=256.0,
+        cpu_free_mb=64_000.0,
+        disk_free_mb=0.0,
+    )
+    assert mode is OffloadMode.GPU
+    assert reason.key == "user_gpu_fixed_batch_budget"
+
+
+@pytest.mark.parametrize("budget", [0, -1.0])
+def test_fixed_memory_budget_must_be_positive(budget):
+    mgr = InferenceManager(enc_name="tf_col", out_dim=4)
+    with pytest.raises(ValueError, match="must be positive or None"):
+        mgr.configure(device="cpu", fixed_memory_budget_mb=budget)
 
 
 def test_supports_auto_batching_false_when_backend_api_missing(monkeypatch):
