@@ -160,8 +160,18 @@ class TabICLBaseEstimator(BaseEstimator):
                 "offload": self.offload_mode,
                 "disk_offload_dir": self.disk_offload_dir,
             },
-            "ROW_CONFIG": {"device": self.device_, "use_amp": use_amp, "use_fa3": use_fa3, "verbose": self.verbose},
-            "ICL_CONFIG": {"device": self.device_, "use_amp": use_amp, "use_fa3": use_fa3, "verbose": self.verbose},
+            "ROW_CONFIG": {
+                "device": self.device_,
+                "use_amp": use_amp,
+                "use_fa3": use_fa3,
+                "verbose": self.verbose,
+            },
+            "ICL_CONFIG": {
+                "device": self.device_,
+                "use_amp": use_amp,
+                "use_fa3": use_fa3,
+                "verbose": self.verbose,
+            },
         }
         if self.inference_config is None:
             self.inference_config_ = InferenceConfig()
@@ -204,9 +214,28 @@ class TabICLBaseEstimator(BaseEstimator):
                 )
 
         device_cache = OrderedDict()
+        max_chunk_bytes = self._cache_transfer_chunk_bytes()
         for method, cache in self.model_kv_cache_.items():
-            device_cache[method] = cache.to(self.device_, dtype=upcast_dtype)
+            device_cache[method] = cache.to(
+                self.device_,
+                dtype=upcast_dtype,
+                max_chunk_bytes=max_chunk_bytes,
+            )
         self.model_kv_cache_ = device_cache
+
+    def _cache_transfer_chunk_bytes(self) -> Optional[int]:
+        """Use the fixed inference budget to bound cache persistence transfers."""
+        config = getattr(self, "inference_config_", None)
+        budgets = []
+        if config is not None:
+            for name in ("COL_CONFIG", "ROW_CONFIG", "ICL_CONFIG"):
+                stage = getattr(config, name, None)
+                budget = getattr(stage, "fixed_memory_budget_mb", None)
+                if budget is not None:
+                    budgets.append(float(budget))
+        if not budgets:
+            return None
+        return int(min(budgets) * 1024 * 1024)
 
     def __getstate__(self):
         """Customize pickle serialization.
@@ -257,7 +286,9 @@ class TabICLBaseEstimator(BaseEstimator):
         # Handle model weights
         if save_model_weights and hasattr(self, "model_"):
             # Save state dict (not nn.Module itself)
-            state["_model_state_dict"] = {k: v.cpu() for k, v in self.model_.state_dict().items()}
+            state["_model_state_dict"] = {
+                k: v.cpu() for k, v in self.model_.state_dict().items()
+            }
             # model_config_ stays in state
         else:
             state.pop("model_config_", None)
@@ -266,8 +297,9 @@ class TabICLBaseEstimator(BaseEstimator):
         # Handle KV cache
         if save_kv_cache and state.get("model_kv_cache_") is not None:
             cpu_cache = OrderedDict()
+            max_chunk_bytes = self._cache_transfer_chunk_bytes()
             for method, cache in state["model_kv_cache_"].items():
-                cpu_cache[method] = cache.to("cpu")
+                cpu_cache[method] = cache.to("cpu", max_chunk_bytes=max_chunk_bytes)
             state["model_kv_cache_"] = cpu_cache
 
         # Handle training data
@@ -377,7 +409,9 @@ class TabICLBaseEstimator(BaseEstimator):
         """
         check_is_fitted(self)
 
-        has_kv_cache = hasattr(self, "model_kv_cache_") and self.model_kv_cache_ is not None
+        has_kv_cache = (
+            hasattr(self, "model_kv_cache_") and self.model_kv_cache_ is not None
+        )
         if not save_training_data and not (save_kv_cache and has_kv_cache):
             raise ValueError(
                 "Cannot exclude training data when KV cache is not available or not being saved. "
@@ -399,7 +433,9 @@ class TabICLBaseEstimator(BaseEstimator):
             del self._save_training_data
 
     @classmethod
-    def load(cls, path: str | Path, device: Optional[str | torch.device] = None) -> TabICLBaseEstimator:
+    def load(
+        cls, path: str | Path, device: Optional[str | torch.device] = None
+    ) -> TabICLBaseEstimator:
         """Load a fitted estimator from a file.
 
         Parameters

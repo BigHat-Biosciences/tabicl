@@ -16,6 +16,43 @@ import torch
 from torch import Tensor
 
 
+def _move_tensor_in_chunks(
+    tensor: Tensor,
+    device,
+    dtype=None,
+    max_chunk_bytes: Optional[int] = None,
+) -> Tensor:
+    """Move a tensor while bounding each source-to-target transfer.
+
+    Lazy accelerator backends may lower a device transfer as a compiled graph.
+    Moving a multi-gigabyte cache tensor in one graph can exceed compiler/runtime
+    limits even when the final tensor fits in accelerator memory.  Split along
+    the widest dimension, move deterministic chunks, then concatenate on the
+    destination.  A fixed byte limit therefore also gives stable graph shapes.
+    """
+    target_dtype = tensor.dtype if dtype is None else dtype
+    target_element_size = torch.empty((), dtype=target_dtype).element_size()
+    target_bytes = tensor.numel() * target_element_size
+    if not max_chunk_bytes or target_bytes <= max_chunk_bytes or tensor.ndim == 0:
+        return tensor.to(device=device, dtype=dtype)
+
+    split_dim = max(range(tensor.ndim), key=lambda dim: tensor.shape[dim])
+    split_size = tensor.shape[split_dim]
+    bytes_per_index = max(1, target_bytes // split_size)
+    chunk_size = max(1, max_chunk_bytes // bytes_per_index)
+    if chunk_size >= split_size:
+        return tensor.to(device=device, dtype=dtype)
+
+    chunks = [
+        tensor.narrow(split_dim, start, min(chunk_size, split_size - start)).to(
+            device=device,
+            dtype=dtype,
+        )
+        for start in range(0, split_size, chunk_size)
+    ]
+    return torch.cat(chunks, dim=split_dim)
+
+
 @dataclass
 class KVCacheEntry:
     """A single key-value cache entry for an attention layer.
@@ -52,7 +89,9 @@ class KVCacheEntry:
             self.key[indices] = other.key
             self.value[indices] = other.value
 
-    def to(self, device, dtype=None) -> KVCacheEntry:
+    def to(
+        self, device, dtype=None, max_chunk_bytes: Optional[int] = None
+    ) -> KVCacheEntry:
         """Move this entry to the given device and optionally cast dtype.
 
         Returns a new KVCacheEntry.
@@ -60,8 +99,8 @@ class KVCacheEntry:
         if not self.is_valid():
             return KVCacheEntry()
         return KVCacheEntry(
-            key=self.key.to(device=device, dtype=dtype),
-            value=self.value.to(device=device, dtype=dtype),
+            key=_move_tensor_in_chunks(self.key, device, dtype, max_chunk_bytes),
+            value=_move_tensor_in_chunks(self.value, device, dtype, max_chunk_bytes),
         )
 
     @staticmethod
@@ -85,7 +124,9 @@ class KVCacheEntry:
         values = [e.value for e in entries if e.is_valid()]
         if not keys:
             return KVCacheEntry()
-        return KVCacheEntry(key=torch.cat(keys, dim=dim), value=torch.cat(values, dim=dim))
+        return KVCacheEntry(
+            key=torch.cat(keys, dim=dim), value=torch.cat(values, dim=dim)
+        )
 
 
 @dataclass
@@ -124,15 +165,22 @@ class KVCache:
         for idx, other_entry in other.kv.items():
             if idx in self.kv:
                 target = self.kv[idx]
-                assert target.is_valid(), f"Cannot write to cache index {idx} because it is not valid."
-                self.kv[idx][indices] = other_entry.to(target.key.device, dtype=target.key.dtype)
+                assert target.is_valid(), (
+                    f"Cannot write to cache index {idx} because it is not valid."
+                )
+                self.kv[idx][indices] = other_entry.to(
+                    target.key.device, dtype=target.key.dtype
+                )
 
-    def to(self, device, dtype=None) -> KVCache:
+    def to(self, device, dtype=None, max_chunk_bytes: Optional[int] = None) -> KVCache:
         """Move all entries to the given device and optionally cast dtype.
 
         Returns a new cache of the same subclass type.
         """
-        moved_kv = {idx: entry.to(device, dtype=dtype) for idx, entry in self.kv.items()}
+        moved_kv = {
+            idx: entry.to(device, dtype=dtype, max_chunk_bytes=max_chunk_bytes)
+            for idx, entry in self.kv.items()
+        }
         return self.__class__(kv=moved_kv)
 
     @staticmethod
@@ -161,7 +209,9 @@ class KVCache:
             merged_kv[idx] = KVCacheEntry.concat(entries, dim=dim)
         return KVCache(kv=merged_kv)
 
-    def preallocate(self, reference: KVCache, batch_shape: tuple, device="cpu", dtype=None):
+    def preallocate(
+        self, reference: KVCache, batch_shape: tuple, device="cpu", dtype=None
+    ):
         """Pre-allocate entries in this cache based on shapes from a reference.
 
         K/V tensors always have shape ``(*batch, num_heads, seq_len, head_dim)``.
@@ -304,7 +354,9 @@ class TabICLCache:
             num_classes=self.num_classes,
         )
 
-    def to(self, device, dtype=None) -> TabICLCache:
+    def to(
+        self, device, dtype=None, max_chunk_bytes: Optional[int] = None
+    ) -> TabICLCache:
         """Move all cached tensors to the given device and optionally cast dtype.
 
         Parameters
@@ -321,9 +373,21 @@ class TabICLCache:
             New cache with all tensors on the target device.
         """
         return TabICLCache(
-            col_cache=self.col_cache.to(device, dtype=dtype) if self.col_cache else KVCache(),
-            row_repr=self.row_repr.to(device=device, dtype=dtype) if self.row_repr is not None else None,
-            icl_cache=self.icl_cache.to(device, dtype=dtype) if self.icl_cache else KVCache(),
+            col_cache=(
+                self.col_cache.to(device, dtype=dtype, max_chunk_bytes=max_chunk_bytes)
+                if self.col_cache
+                else KVCache()
+            ),
+            row_repr=(
+                _move_tensor_in_chunks(self.row_repr, device, dtype, max_chunk_bytes)
+                if self.row_repr is not None
+                else None
+            ),
+            icl_cache=(
+                self.icl_cache.to(device, dtype=dtype, max_chunk_bytes=max_chunk_bytes)
+                if self.icl_cache
+                else KVCache()
+            ),
             train_shape=self.train_shape,
             num_classes=self.num_classes,
         )
