@@ -575,7 +575,7 @@ class TabICL(nn.Module):
 
             - "mean", "variance", "median": (B, test_size)
             - "quantiles": (B, test_size, len(alphas))
-            - "raw_quantiles": (B, test_size, num_quantiles), where `num_quantiles` denotes 
+            - "raw_quantiles": (B, test_size, num_quantiles), where `num_quantiles` denotes
                 the number of quantile levels configured in the model architecture.
         """
         assert self.max_classes == 0, "predict_stats is only applicable for regression tasks"
@@ -865,7 +865,7 @@ class TabICL(nn.Module):
 
             - "mean", "variance", "median": (B, test_size)
             - "quantiles": (B, test_size, len(alphas))
-            - "raw_quantiles": (B, test_size, num_quantiles), where `num_quantiles` denotes 
+            - "raw_quantiles": (B, test_size, num_quantiles), where `num_quantiles` denotes
                 the number of quantile levels configured in the model architecture.
         """
         assert self.max_classes == 0, "predict_stats_with_cache is only applicable for regression tasks"
@@ -884,6 +884,11 @@ class TabICL(nn.Module):
         if raw_quantiles is None:
             return None
 
+        # Mixed-device inference may place only the ICL predictor on an
+        # accelerator while keeping distribution post-processing on the host.
+        # Follow the quantile module's registered buffer rather than assuming
+        # the predictor and post-processor share a device.
+        raw_quantiles = raw_quantiles.to(self.quantile_dist.alpha_levels.device)
         dist = self.quantile_dist(raw_quantiles)
         raw_quantiles = dist.quantiles
 
