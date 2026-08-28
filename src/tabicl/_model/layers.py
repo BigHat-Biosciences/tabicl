@@ -782,14 +782,11 @@ class InducedSelfAttentionBlock(nn.Module):
         if store_cache and train_size is None:
             raise ValueError("train_size must be provided when store_cache=True")
 
-        # When using cache, we need consistent batch dimensions, so we don't apply skip_mask
-        # The cache was populated with the full batch shape
+        # Cache tensors require consistent batch dimensions, so every batch must
+        # execute the attention path. Restore sentinel outputs with a tensor
+        # selection afterwards rather than branching in Python on ``.all()`` or
+        # using boolean-indexed in-place writes; those data-dependent host branches
+        # also break static-graph backends such as XLA/Neuron.
         skip_mask = (src == self.skip_value).all(dim=(-2, -1))
-        if skip_mask.all():
-            return torch.full_like(src, self.skip_value)
-        else:
-            out = self.induced_attention_with_cache(src, col_cache, block_idx, train_size, use_cache, store_cache)
-            # Restore skip values in output
-            if skip_mask.any():
-                out[skip_mask] = self.skip_value
-            return out
+        out = self.induced_attention_with_cache(src, col_cache, block_idx, train_size, use_cache, store_cache)
+        return torch.where(skip_mask[..., None, None], torch.full_like(out, self.skip_value), out)

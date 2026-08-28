@@ -20,6 +20,11 @@ New features
 Bug fixes
 ---------
 
+- Make cache-aware induced attention static-graph safe by always executing the
+  full-batch attention path and restoring skip sentinels with `torch.where`.
+  This preserves cache batch shapes and avoids data-dependent Python branches
+  and boolean-indexed writes on XLA/Neuron.
+
 - Support backends without memory-introspection APIs, so `device="xla"` (`torch_xla`) is routed correctly instead of failing with a misleading CUDA error. Such backends can provide `fixed_memory_budget_mb` to preserve deterministic auto-batching and tiling without querying live free memory; otherwise auto-batching remains disabled because `0.0` means "unknown", not "nothing free". `backend_is_available()` also resolves backends that ship as their own top-level module rather than as `torch.<device_type>`; `xla` is deliberately excluded from the default device preference because importing `torch_xla` initializes the PJRT runtime as a side effect, so it must be requested explicitly.
 
 - When unpickling a TabICL estimator, the fitted attributes `device_`, `model_`, etc. are only state if the pickled model was fitted. ([PR#121](https://github.com/soda-inria/tabicl/pull/121))
