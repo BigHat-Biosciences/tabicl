@@ -3,6 +3,7 @@ from unittest.mock import patch
 import torch
 
 from tabicl._model.kv_cache import KVCache, KVCacheEntry, TabICLCache
+from tabicl._sklearn.base import TabICLBaseEstimator
 
 
 def test_cache_transfer_chunks_tensors_larger_than_fixed_budget():
@@ -35,3 +36,15 @@ def test_cache_transfer_skips_chunking_when_tensor_fits_budget():
     cat.assert_not_called()
     torch.testing.assert_close(moved.key, key)
     torch.testing.assert_close(moved.value, key)
+
+
+def test_pickle_state_excludes_cache_when_save_kv_cache_is_false():
+    estimator = object.__new__(TabICLBaseEstimator)
+    estimator.model_kv_cache_ = {"none": TabICLCache(row_repr=torch.ones(2, 3))}
+    estimator._save_model_weights = False
+    estimator._save_training_data = True
+    estimator._save_kv_cache = False
+
+    state = estimator.__getstate__()
+
+    assert "model_kv_cache_" not in state

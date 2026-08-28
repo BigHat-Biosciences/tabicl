@@ -301,6 +301,8 @@ class TabICLBaseEstimator(BaseEstimator):
             for method, cache in state["model_kv_cache_"].items():
                 cpu_cache[method] = cache.to("cpu", max_chunk_bytes=max_chunk_bytes)
             state["model_kv_cache_"] = cpu_cache
+        elif not save_kv_cache:
+            state.pop("model_kv_cache_", None)
 
         # Handle training data
         if not save_training_data and "ensemble_generator_" in state:

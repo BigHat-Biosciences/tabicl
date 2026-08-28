@@ -22,7 +22,8 @@ Bug fixes
 
 - Bound cache persistence transfers by `fixed_memory_budget_mb`. Large lazy-device
   cache tensors are moved in deterministic chunks before concatenation on the
-  destination, avoiding a single multi-gigabyte transfer graph on XLA/Neuron.
+  destination, avoiding a single multi-gigabyte transfer graph on XLA/Neuron. Saving
+  with `save_kv_cache=False` now also actually excludes the cache from pickle state.
 
 - Make cache-aware induced attention static-graph safe by always executing the
   full-batch attention path and restoring skip sentinels with `torch.where`.
